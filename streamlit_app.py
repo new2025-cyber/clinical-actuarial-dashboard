@@ -4,33 +4,27 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 
-# Optional validation (installed via requirements.txt)
+# Data validation
 import pandera as pa
 from pandera import Column, DataFrameSchema, Check
 
 st.set_page_config(page_title="Clinical–Actuarial Profiling Dashboard", layout="wide")
 st.title("Clinical–Actuarial Scoring & Risk Dashboard")
 
-# ====== REQUIRED & OPTIONAL COLUMNS ======
-REQUIRED_COLUMNS = [
-    "patient_id", "BAS", "CRS", "CARS", "PCS", "PPS", "FEI",
-]
+# ===== Required / Optional columns =====
+REQUIRED_COLUMNS = ["patient_id", "BAS", "CRS", "CARS", "PCS", "PPS", "FEI"]
 OPTIONAL_READMIT_COLS = ["readmitted_30d", "expected_readmit_rate"]
-OPTIONAL_PROVIDER_COLS = ["provider_id"]     # for O/E by provider (optional)
-OPTIONAL_TIME_COLS = ["period"]              # e.g., "2025-10" (optional)
+OPTIONAL_PROVIDER_COLS = ["provider_id"]   # for O/E aggregation (optional)
+OPTIONAL_TIME_COLS = ["period"]            # e.g., "2025-10" (optional)
 
-# ====== HELPERS ======
+# ===== Helpers =====
 def check_columns(df: pd.DataFrame):
-    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-    return missing
+    return [c for c in REQUIRED_COLUMNS if c not in df.columns]
 
 def classify_patient(upi: float, hi=80, med=60) -> str:
-    if upi >= hi:
-        return "High Risk"
-    elif upi >= med:
-        return "Medium Risk"
-    else:
-        return "Low Risk"
+    if upi >= hi: return "High Risk"
+    if upi >= med: return "Medium Risk"
+    return "Low Risk"
 
 def normalize_series(s: pd.Series, method: str) -> pd.Series:
     """MinMax 0–100 (if needed) or robust Quantile rank scaled to 0–100."""
@@ -41,9 +35,8 @@ def normalize_series(s: pd.Series, method: str) -> pd.Series:
         if s.max() == s.min():
             return pd.Series([100]*len(s), index=s.index)
         return (s - s.min()) / (s.max() - s.min()) * 100
-    else:
-        # Quantile rank (robust to outliers)
-        return s.rank(pct=True) * 100
+    # Quantile rank (robust to outliers)
+    return s.rank(pct=True) * 100
 
 def calc_provider_penalty(row, readmit_weight=0.0):
     """
@@ -54,19 +47,18 @@ def calc_provider_penalty(row, readmit_weight=0.0):
     if "provider_readmit_score" in row and pd.notnull(row["provider_readmit_score"]):
         readmit_pen = 100 - row["provider_readmit_score"]
         return (1 - readmit_weight) * base_pen + readmit_weight * readmit_pen
-    else:
-        return base_pen
+    return base_pen
 
 def calc_upi(row, w_bas, w_crs, w_cars, w_penalty, w_fei):
     return (
-        w_bas * row["BAS"]
-        + w_crs * row["CRS"]
-        + w_cars * row["CARS"]
-        + w_penalty * row["provider_penalty"]
-        + w_fei * row["FEI"]
+        w_bas * row["BAS"] +
+        w_crs * row["CRS"] +
+        w_cars * row["CARS"] +
+        w_penalty * row["provider_penalty"] +
+        w_fei * row["FEI"]
     )
 
-# ====== SIDEBAR: Weights, Readmission, Normalization, Thresholds, Settings I/O ======
+# ===== Sidebar: weights / normalization / thresholds / readmission / settings =====
 st.sidebar.header("Weights Configuration")
 w_bas = st.sidebar.slider("Weight: BAS", 0.0, 1.0, 0.25, 0.01)
 w_crs = st.sidebar.slider("Weight: CRS", 0.0, 1.0, 0.25, 0.01)
@@ -79,9 +71,7 @@ if abs(total_w - 1.0) > 0.001:
     st.sidebar.warning(f"Current total weight = {total_w:.2f}. Consider adjusting near 1.00.")
 
 st.sidebar.header("Readmission Settings")
-readmit_weight = st.sidebar.slider(
-    "Weight of readmission in provider penalty", 0.0, 1.0, 0.20, 0.05
-)
+readmit_weight = st.sidebar.slider("Weight of readmission in provider penalty", 0.0, 1.0, 0.20, 0.05)
 st.sidebar.caption("Applies only if 'readmitted_30d' and 'expected_readmit_rate' exist in the file.")
 
 norm_method = st.sidebar.selectbox(
@@ -117,7 +107,7 @@ if uploaded_settings is not None:
     except Exception as e:
         st.sidebar.error(f"Invalid settings file: {e}")
 
-# ====== UPLOAD ======
+# ===== Upload =====
 uploaded_file = st.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx", "xls"])
 if uploaded_file is None:
     st.info("Upload a file to start.")
@@ -137,21 +127,20 @@ if missing:
     st.error(f"Missing required columns: {missing}")
     st.stop()
 
-# ====== TABS: Data Quality / Dashboard ======
+# ===== Tabs: Data Quality / Dashboard =====
 tab_quality, tab_dash = st.tabs(["🧪 Data Quality", "📊 Dashboard"])
 
 with tab_quality:
-    st.markdown(f"**Rows:** {df.shape[0]} &nbsp;&nbsp; **Columns:** {df.shape[1]}")
+    st.markdown("### Data Quality Overview")
+    st.write(f"**Rows:** {df.shape[0]} &nbsp;&nbsp; **Columns:** {df.shape[1]}")
     st.markdown("**Missing values per required column:**")
     st.write(df[REQUIRED_COLUMNS].isna().sum())
 
-    # Unique patient_id check
     if "patient_id" in df.columns:
         dup = df["patient_id"].duplicated().sum()
         if dup > 0:
             st.warning(f"Found {dup} duplicated patient_id(s).")
 
-    # Strict schema (0–100) for required numeric columns
     SCHEMA = DataFrameSchema({
         "patient_id": Column(object),
         "BAS": Column(float, checks=Check.in_range(0, 100)),
@@ -162,22 +151,28 @@ with tab_quality:
         "FEI": Column(float, checks=Check.in_range(0, 100)),
     }, coerce=True)
 
+    st.markdown("**Schema validation (types + 0–100 bounds):**")
     try:
         _ = SCHEMA.validate(df[REQUIRED_COLUMNS], lazy=True)
-        st.success("Schema validation passed (types + 0–100 bounds).")
+        st.success("Schema validation passed.")
     except pa.errors.SchemaErrors as err:
         st.error("Schema validation failed. First issues shown below.")
-        st.dataframe(err.failure_cases.head(25), use_container_width=False)
+        try:
+            st.dataframe(err.failure_cases.head(25), width="stretch")
+        except Exception:
+            st.text(str(err)[:2000])
+
+    st.caption("Fix schema issues in your file then re-upload for clean calculations.")
 
 with tab_dash:
-    # ====== NORMALIZATION ======
+    # ===== Normalization =====
     data = df.copy()
     for col in ["BAS", "CRS", "CARS", "PCS", "PPS", "FEI"]:
         data[col] = normalize_series(df[col], norm_method)
 
     data = data.dropna(subset=["patient_id"])
 
-    # ====== READMISSION (per-patient) ======
+    # ===== Readmission per-patient (optional) =====
     if all(c in data.columns for c in OPTIONAL_READMIT_COLS):
         data["readmitted_30d"] = pd.to_numeric(data["readmitted_30d"], errors="coerce")
         data["expected_readmit_rate"] = pd.to_numeric(data["expected_readmit_rate"], errors="coerce")
@@ -185,8 +180,8 @@ with tab_dash:
         def calc_readmit_score(row):
             if pd.isna(row["expected_readmit_rate"]) or row["expected_readmit_rate"] == 0:
                 return None
-            observed = row["readmitted_30d"]  # 0/1
-            expected = row["expected_readmit_rate"]  # e.g., 0.15
+            observed = row["readmitted_30d"]          # 0/1
+            expected = row["expected_readmit_rate"]   # e.g., 0.15
             score = 100 * (1 - (observed / expected))
             return max(0, min(100, score))
 
@@ -194,11 +189,10 @@ with tab_dash:
     else:
         data["provider_readmit_score"] = None
 
-    # ====== PROVIDER O/E (risk-adjusted PPS with shrinkage), optional ======
+    # ===== Provider O/E with shrinkage (optional) =====
     has_provider = all(c in data.columns for c in OPTIONAL_PROVIDER_COLS)
     has_readmit = all(c in data.columns for c in OPTIONAL_READMIT_COLS)
     if has_provider and has_readmit:
-        # Clean numeric
         data["readmitted_30d"] = pd.to_numeric(data["readmitted_30d"], errors="coerce").fillna(0)
         data["expected_readmit_rate"] = pd.to_numeric(data["expected_readmit_rate"], errors="coerce")
 
@@ -222,19 +216,15 @@ with tab_dash:
     else:
         data["pps_oe_score"] = np.nan
 
-    # Choose effective PPS (risk-adjusted if available)
+    # Use risk-adjusted PPS if available
     data["PPS_eff"] = data["pps_oe_score"].where(data["pps_oe_score"].notna(), data["PPS"])
 
-    # ====== PENALTY + UPI ======
-    data["provider_penalty"] = data.apply(
-        lambda r: calc_provider_penalty(r, readmit_weight=readmit_weight), axis=1
-    )
-    data["UPI"] = data.apply(
-        lambda r: calc_upi(r, w_bas, w_crs, w_cars, w_penalty, w_fei), axis=1
-    )
+    # ===== Penalty + UPI =====
+    data["provider_penalty"] = data.apply(lambda r: calc_provider_penalty(r, readmit_weight=readmit_weight), axis=1)
+    data["UPI"] = data.apply(lambda r: calc_upi(r, w_bas, w_crs, w_cars, w_penalty, w_fei), axis=1)
     data["risk_level"] = data["UPI"].apply(lambda x: classify_patient(x, thr_high, thr_med))
 
-    # ====== KPIs ======
+    # ===== KPIs =====
     total_patients = len(data)
     high_risk = (data["risk_level"] == "High Risk").sum()
     avg_upi = data["UPI"].mean()
@@ -244,10 +234,10 @@ with tab_dash:
     c2.metric("High-Risk Patients", high_risk)
     c3.metric("Average UPI", f"{avg_upi:.2f}")
 
-    # ====== CHART ======
+    # ===== Chart =====
     st.subheader("UPI Distribution")
     fig = px.histogram(data, x="UPI", nbins=20, title="UPI Histogram")
-    st.plotly_chart(fig, width="stretch")  # use_container_width deprecated
+    st.plotly_chart(fig, width="stretch")
 
     with st.expander("ℹ️ Method Summary"):
         st.markdown(
@@ -260,23 +250,18 @@ with tab_dash:
             """
         )
 
-    # ====== TRENDS (optional) ======
+    # ===== Optional trends =====
     if all(c in data.columns for c in OPTIONAL_TIME_COLS):
         st.subheader("UPI Trends over time")
         try:
-            agg = (
-                data.groupby("period")["UPI"]
-                .agg(["count", "mean"])
-                .reset_index()
-                .sort_values("period")
-            )
+            agg = data.groupby("period")["UPI"].agg(["count", "mean"]).reset_index().sort_values("period")
             fig_tr = px.line(agg, x="period", y="mean", markers=True, title="Average UPI by period")
             st.plotly_chart(fig_tr, width="stretch")
             st.dataframe(agg, width="stretch")
         except Exception as e:
             st.warning(f"Cannot plot trends: {e}")
 
-    # ====== TABLE ======
+    # ===== Table =====
     st.subheader("Patient-Level Results")
     display_cols = [
         "patient_id", "BAS", "CRS", "CARS", "PCS", "PPS", "PPS_eff", "FEI",
@@ -285,16 +270,11 @@ with tab_dash:
     display_cols = [c for c in display_cols if c in data.columns]
     st.dataframe(data[display_cols], width="stretch")
 
-    # ====== DOWNLOAD ======
+    # ===== Downloads =====
     st.subheader("Download Results")
     csv_buffer = io.StringIO()
     data.to_csv(csv_buffer, index=False)
-    st.download_button(
-        label="Download as CSV",
-        data=csv_buffer.getvalue(),
-        file_name="upi_results.csv",
-        mime="text/csv",
-    )
+    st.download_button("Download as CSV", csv_buffer.getvalue(), file_name="upi_results.csv", mime="text/csv")
 
     if "_settings_json" in st.session_state:
         st.download_button(
@@ -304,10 +284,11 @@ with tab_dash:
             mime="application/json",
         )
 
-# ====== FOOTER SIGNATURE ======
+# ===== Footer signature =====
 st.markdown("---")
 st.markdown(
     "<p style='text-align:center; color:#1f77b4; font-size:16px;'>Developed by <b>Mudather</b></p>",
     unsafe_allow_html=True,
 )
 st.caption("Model v1.2 • " + pd.Timestamp.today().strftime("%Y-%m-%d"))
+
