@@ -311,4 +311,3 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.caption("Model v1.2 • " + pd.Timestamp.today().strftime("%Y-%m-%d"))
-
