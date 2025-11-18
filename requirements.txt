@@ -1,8 +1,6 @@
-streamlit
 pandas
+numpy
+streamlit
 plotly
 openpyxl
-pandera
-numpy
-reportlab
-streamlit-autorefresh
+statsmodels
