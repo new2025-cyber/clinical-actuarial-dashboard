@@ -22,7 +22,7 @@ def get_admin_key() -> str:
 
 
 ADMIN_KEY = get_admin_key()
-MODEL_VERSION = "v2.4-DRG"
+MODEL_VERSION = "v2.5-DRG-Timeline"
 
 st.set_page_config(
     page_title="Clinical–Actuarial UPI Dashboard",
@@ -450,26 +450,31 @@ with tab2:
     st.plotly_chart(fig_pcs, use_container_width=True)
 
 # ---------------------------------------------------------------------
-# LEVEL 3 – PATIENT PANEL
+# LEVEL 3 – PATIENT PANEL (with Timeline)
 # ---------------------------------------------------------------------
 with tab3:
     st.subheader("Level 3 – Patient Risk Panel")
 
+    # اختيار المريض
     patients = sorted(data["patient_id"].unique())
     selected_patient = st.selectbox("Select patient", patients)
 
+    # كل بيانات هذا المريض عبر الفترات
     pt = data[data["patient_id"] == selected_patient].copy()
     pt = pt.sort_values("period")
     latest = pt.iloc[-1]
 
+    # كروت ملخصة
     c1, c2, c3 = st.columns(3)
-    c1.metric("UPI", f"{float(latest['UPI']):.1f}")
+    c1.metric("UPI (latest)", f"{float(latest['UPI']):.1f}")
     c2.metric("Risk level", latest["risk_level"])
-    c3.metric("Provider", str(latest["provider_name"]))
+    c3.metric("Provider (latest)", str(latest["provider_name"]))
 
     st.markdown("---")
 
-    st.markdown("### Risk drivers (latest record)")
+    # ---------------- Risk drivers (latest snapshot) ----------------
+    st.markdown("### A) Risk drivers – latest record")
+
     drivers = pd.DataFrame(
         {
             "Score": ["BAS", "CRS", "CARS", "PCS", "PPS", "FEI"],
@@ -483,33 +488,91 @@ with tab3:
             ],
         }
     )
+
     fig_drv = px.bar(
         drivers,
         x="Score",
         y="Value",
         title="Risk drivers (latest)",
-        labels={"Score": "Component", "Value": "Value"},
+        labels={"Score": "Component", "Value": "Score value"},
     )
     st.plotly_chart(fig_drv, use_container_width=True)
 
-    st.markdown("### Provider penalty (latest)")
+    # Provider penalty snapshot
     c4, c5 = st.columns(2)
-    c4.metric("PCS", f"{float(latest['PCS']):.1f}")
-    c5.metric("Provider penalty", f"{float(latest['provider_penalty']):.1f}")
+    c4.metric("PCS (latest)", f"{float(latest['PCS']):.1f}")
+    c5.metric("Provider penalty (latest)", f"{float(latest['provider_penalty']):.1f}")
 
-    st.markdown("### UPI over recent periods")
+    st.markdown("---")
+
+    # ---------------- Patient Risk Timeline ----------------
+    st.markdown("### B) Patient Risk Timeline (multi-metric)")
+
     if len(pt) >= 2:
-        fig_hist_pt = px.line(
-            pt,
-            x="period",
-            y="UPI",
-            markers=True,
-            title="UPI history for selected patient",
-            labels={"period": "Period", "UPI": "UPI"},
+        # نحدد المقاييس التي نرغب في متابعتها عبر الزمن
+        timeline_metrics = ["UPI", "BAS", "CRS", "CARS", "PCS", "PPS", "FEI"]
+
+        timeline_df = pt[["period"] + timeline_metrics].copy()
+
+        # تحويل إلى شكل long لعرضها في خط متعدد (line with color=Metric)
+        tidy = timeline_df.melt(
+            id_vars="period", value_vars=timeline_metrics,
+            var_name="Metric", value_name="Value"
         )
-        st.plotly_chart(fig_hist_pt, use_container_width=True)
+
+        fig_timeline = px.line(
+            tidy,
+            x="period",
+            y="Value",
+            color="Metric",
+            markers=True,
+            title="Risk metrics over time for selected patient",
+            labels={"period": "Period", "Value": "Score value", "Metric": "Metric"},
+        )
+        st.plotly_chart(fig_timeline, use_container_width=True)
+
+        st.caption(
+            "هذه الرسوم توضح تطوّر UPI وباقي المؤشرات (BAS, CRS, CARS, PCS, PPS, FEI) "
+            "عبر الفترات الزمنية لهذا المريض."
+        )
     else:
-        st.info("Only one record available for this patient.")
+        st.info("Only one record available for this patient – timeline requires at least 2 periods.")
+
+    st.markdown("---")
+
+    # ---------------- Financial Timeline ----------------
+    st.markdown("### C) Financial & DRG variance Timeline")
+
+    if len(pt) >= 2:
+        fin_df = pt[["period", "claims_amount", "drg_variance"]].copy()
+
+        # claims over time
+        fig_claims = px.bar(
+            fin_df,
+            x="period",
+            y="claims_amount",
+            title="Claims amount over time",
+            labels={"period": "Period", "claims_amount": "Claims amount"},
+        )
+        st.plotly_chart(fig_claims, use_container_width=True)
+
+        # DRG variance over time
+        fig_var = px.line(
+            fin_df,
+            x="period",
+            y="drg_variance",
+            markers=True,
+            title="DRG variance (%) over time",
+            labels={"period": "Period", "drg_variance": "DRG variance (%)"},
+        )
+        st.plotly_chart(fig_var, use_container_width=True)
+
+        st.caption(
+            "الرسوم أعلاه تربط بين تطوّر التكلفة الفعلية (claims) والانحراف عن تكلفة DRG المتوقعة (DRG variance) "
+            "لنفس المريض عبر الفترات."
+        )
+    else:
+        st.info("Financial timeline requires at least 2 records for this patient.")
 
 # ---------------------------------------------------------------------
 # DRG-LEVEL RISK COMPARISON
@@ -634,151 +697,5 @@ with tab_val:
 
     df_sc = data.copy()
     df_sc["claims_amount"] = pd.to_numeric(df_sc["claims_amount"], errors="coerce")
-    df_sc = df_sc.dropna(subset=["UPI", "claims_amount"])
-
-    if len(df_sc) > 0:
-        fig_sc = px.scatter(
-            df_sc,
-            x="UPI",
-            y="claims_amount",
-            trendline="ols",
-            title="UPI vs claims amount",
-            labels={"UPI": "UPI", "claims_amount": "Claims"},
-        )
-        st.plotly_chart(fig_sc, use_container_width=True)
-
-        corr_upi_claims = df_sc["UPI"].corr(df_sc["claims_amount"])
-        st.caption(f"Correlation(UPI, claims_amount) = {corr_upi_claims:.3f}")
-    else:
-        st.info("Not enough valid rows for UPI vs claims scatter.")
-
-    st.markdown("---")
-
-    # 3) Provider avg UPI vs avg DRG variance
-    st.markdown("### 3) Provider-level: Avg UPI vs Avg DRG variance")
-
-    prov_agg = (
-        data.groupby("provider_name")
-        .agg(
-            avg_upi=("UPI", "mean"),
-            avg_drg_var=("drg_variance", "mean"),
-            n_cases=("patient_id", "count"),
-        )
-        .reset_index()
-    )
-    prov_agg = prov_agg.dropna(subset=["avg_upi", "avg_drg_var"])
-
-    if len(prov_agg) > 0:
-        fig_p = px.scatter(
-            prov_agg,
-            x="avg_upi",
-            y="avg_drg_var",
-            size="n_cases",
-            hover_name="provider_name",
-            title="Provider Avg UPI vs Avg DRG variance",
-            labels={"avg_upi": "Avg UPI", "avg_drg_var": "Avg DRG variance (%)"},
-        )
-        st.plotly_chart(fig_p, use_container_width=True)
-
-        corr_prov = prov_agg["avg_upi"].corr(prov_agg["avg_drg_var"])
-        st.caption(
-            f"Correlation(Provider Avg UPI, Avg DRG variance) = {corr_prov:.3f}"
-        )
-    else:
-        st.info("Not enough provider-level data for this plot.")
-
-    st.markdown("---")
-
-    # 4) DRG variance distribution
-    st.markdown("### 4) DRG variance distribution")
-
-    if data["drg_variance"].notna().any():
-        fig_hist = px.histogram(
-            data,
-            x="drg_variance",
-            nbins=40,
-            title="Distribution of DRG variance (%)",
-            labels={"drg_variance": "DRG variance (%)"},
-        )
-        st.plotly_chart(fig_hist, use_container_width=True)
-    else:
-        st.info("No valid DRG variance values to show distribution.")
-
-# ---------------------------------------------------------------------
-# MODEL GOVERNANCE / LOGS
-# ---------------------------------------------------------------------
-with tab_logs:
-    st.subheader("Model Governance – Run Logs")
-
-    if not os.path.isfile(LOG_FILE):
-        st.info("No logs found yet. Use 'Log this run' button in Level 1.")
-    else:
-        logs = pd.read_csv(LOG_FILE)
-
-        if "timestamp" in logs.columns:
-            logs["timestamp"] = pd.to_datetime(
-                logs["timestamp"], errors="coerce"
-            )
-
-        logs = logs.sort_values("timestamp")
-
-        col_a, col_b = st.columns(2)
-
-        # Download logs
-        buf = io.StringIO()
-        logs.to_csv(buf, index=False)
-        col_a.download_button(
-            "Download logs as CSV",
-            buf.getvalue(),
-            "upi_runs_log.csv",
-            "text/csv",
-        )
-
-        # Clear logs (admin only)
-        if IS_ADMIN:
-            if col_b.button("Clear logs (admin only)"):
-                os.remove(LOG_FILE)
-                st.warning("Logs cleared.")
-                st.stop()
-        else:
-            col_b.caption("Only admin can clear logs.")
-
-        st.markdown("---")
-
-        total_runs = len(logs)
-        last_time = logs["timestamp"].max()
-        last_avg = (
-            logs["avg_upi"].iloc[-1]
-            if "avg_upi" in logs.columns
-            else None
-        )
-
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total runs", total_runs)
-        m2.metric("Last run time", str(last_time))
-        if last_avg is not None:
-            m3.metric("Last avg UPI", f"{float(last_avg):.2f}")
-        else:
-            m3.metric("Last avg UPI", "N/A")
-
-        st.markdown("### Latest 20 runs")
-        st.dataframe(
-            logs.sort_values("timestamp", ascending=False).head(20),
-            use_container_width=True,
-        )
-
-# =====================================================================
-# FOOTER
-# =====================================================================
-
-st.markdown("---")
-st.markdown(
-    "<p style='text-align:center; color:#1f77b4; font-size:16px;'>Developed by <b>Mudather</b></p>",
-    unsafe_allow_html=True,
-)
-st.caption(
-    "Model "
-    + MODEL_VERSION
-    + " • "
-    + dt.datetime.now().strftime("%Y-%m-%d")
-)
+    df_sc = df_sc.dropna(subset["UPI", "claims_amount"])
+    # NOTE: fix subset syntax
