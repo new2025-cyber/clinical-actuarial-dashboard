@@ -277,7 +277,7 @@ def log_run(df: pd.DataFrame, ds_name: str) -> None:
 # TABS
 # =====================================================================
 
-tab1, tab2, tab3, tab_drg, tab_val, tab_logs = st.tabs(
+tab1, tab2, tab3, tab_drg, tab_val, tab_logs, tab_sim = st.tabs(
     [
         "Level 1 – Strategic Executive Dashboard",
         "Level 2 – Facility Performance",
@@ -285,6 +285,7 @@ tab1, tab2, tab3, tab_drg, tab_val, tab_logs = st.tabs(
         "DRG-Level Risk Comparison",
         "Model Validation Lab",
         "Model Governance / Logs",
+        "Business Impact Simulator",
     ]
 )
 
@@ -454,16 +455,13 @@ with tab2:
 with tab3:
     st.subheader("Level 3 – Patient Risk Panel")
 
-    # اختيار المريض
     patients = sorted(data["patient_id"].unique())
     selected_patient = st.selectbox("Select patient", patients)
 
-    # كل بيانات هذا المريض عبر الفترات
     pt = data[data["patient_id"] == selected_patient].copy()
     pt = pt.sort_values("period")
     latest = pt.iloc[-1]
 
-    # كروت ملخصة
     c1, c2, c3 = st.columns(3)
     c1.metric("UPI (latest)", f"{float(latest['UPI']):.1f}")
     c2.metric("Risk level", latest["risk_level"])
@@ -471,7 +469,6 @@ with tab3:
 
     st.markdown("---")
 
-    # ---------------- Risk drivers (latest snapshot) ----------------
     st.markdown("### A) Risk drivers – latest record")
 
     drivers = pd.DataFrame(
@@ -497,18 +494,15 @@ with tab3:
     )
     st.plotly_chart(fig_drv, use_container_width=True)
 
-    # Provider penalty snapshot
     c4, c5 = st.columns(2)
     c4.metric("PCS (latest)", f"{float(latest['PCS']):.1f}")
     c5.metric("Provider penalty (latest)", f"{float(latest['provider_penalty']):.1f}")
 
     st.markdown("---")
 
-    # ---------------- Patient Risk Timeline ----------------
     st.markdown("### B) Patient Risk Timeline (multi-metric)")
 
     if len(pt) >= 2:
-        # المقاييس التي نتابعها عبر الزمن
         timeline_metrics = ["UPI", "BAS", "CRS", "CARS", "PCS", "PPS", "FEI"]
         timeline_df = pt[["period"] + timeline_metrics].copy()
 
@@ -539,13 +533,11 @@ with tab3:
 
     st.markdown("---")
 
-    # ---------------- Financial Timeline ----------------
     st.markdown("### C) Financial & DRG variance Timeline")
 
     if len(pt) >= 2:
         fin_df = pt[["period", "claims_amount", "drg_variance"]].copy()
 
-        # claims over time
         fig_claims = px.bar(
             fin_df,
             x="period",
@@ -555,7 +547,6 @@ with tab3:
         )
         st.plotly_chart(fig_claims, use_container_width=True)
 
-        # DRG variance over time
         fig_var = px.line(
             fin_df,
             x="period",
@@ -659,7 +650,6 @@ with tab_drg:
 with tab_val:
     st.subheader("Model Validation Lab – Correlation & Calibration")
 
-    # 1) Correlation matrix
     st.markdown("### 1) Correlation matrix")
 
     candidate_cols = [
@@ -691,7 +681,6 @@ with tab_val:
 
     st.markdown("---")
 
-    # 2) UPI vs claims
     st.markdown("### 2) UPI vs claims amount")
 
     df_sc = data.copy()
@@ -704,7 +693,7 @@ with tab_val:
             x="UPI",
             y="claims_amount",
             color="provider_name",
-            trendline="ols",  # requires statsmodels
+            trendline="ols",
             title="UPI vs claims amount (with OLS trendline)",
             labels={"UPI": "UPI", "claims_amount": "Claims amount"},
         )
@@ -717,7 +706,6 @@ with tab_val:
 
     st.markdown("---")
 
-    # 3) Provider avg UPI vs avg DRG variance
     st.markdown("### 3) Provider avg UPI vs avg DRG variance")
 
     prov_val = (
@@ -750,7 +738,6 @@ with tab_val:
 
     st.markdown("---")
 
-    # 4) DRG variance distribution
     st.markdown("### 4) DRG variance distribution")
     dv = pd.to_numeric(data["drg_variance"], errors="coerce").dropna()
     if len(dv) > 0:
@@ -790,6 +777,123 @@ with tab_logs:
             st.plotly_chart(fig_log_trend, use_container_width=True)
     else:
         st.info("No log file found yet. Use 'Log this run' in Level 1 to create it.")
+
+# ---------------------------------------------------------------------
+# BUSINESS IMPACT SIMULATOR (MVP FOR BUSINESS)
+# ---------------------------------------------------------------------
+with tab_sim:
+    st.subheader("Business Impact Simulator (What-if Analysis)")
+
+    st.write(
+        "⚠️ هذا التبويب يستخدم بيانات تجريبية / أو غير معتمدة بعد، "
+        "والمخرجات لغرض توضيح الفكرة فقط، وليست أداة قرار نهائي."
+    )
+
+    scope = st.radio(
+        "Scope of improvement",
+        ["All providers", "Single provider"],
+        horizontal=True,
+    )
+
+    if scope == "Single provider":
+        prov_list = sorted(data["provider_name"].unique())
+        selected_scope_provider = st.selectbox(
+            "Select provider for simulation", prov_list
+        )
+        mask_scope = data["provider_name"] == selected_scope_provider
+    else:
+        selected_scope_provider = None
+        mask_scope = pd.Series(True, index=data.index)
+
+    st.markdown("### Choose improvement scenario")
+
+    improve_pcs = st.checkbox("Improve PCS", value=True)
+    delta_pcs = (
+        st.slider("PCS improvement (points)", 0.0, 20.0, 5.0) if improve_pcs else 0.0
+    )
+
+    improve_pps = st.checkbox("Improve PPS (performance)", value=False)
+    delta_pps = (
+        st.slider("PPS improvement (points)", 0.0, 20.0, 5.0) if improve_pps else 0.0
+    )
+
+    if not improve_pcs and not improve_pps:
+        st.info("Select at least one improvement (PCS or PPS) to run the simulation.")
+    else:
+        base = data.copy()
+        base_high = int((base["risk_level"] == "High Risk").sum())
+        base_avg_upi = float(base["UPI"].mean())
+
+        sim = data.copy()
+
+        if improve_pcs:
+            sim.loc[mask_scope, "PCS"] = (sim.loc[mask_scope, "PCS"] + delta_pcs).clip(
+                upper=100.0
+            )
+        if improve_pps:
+            sim.loc[mask_scope, "PPS"] = (sim.loc[mask_scope, "PPS"] + delta_pps).clip(
+                upper=100.0
+            )
+
+        sim["provider_penalty"] = sim.apply(calc_provider_penalty, axis=1)
+        sim["UPI"] = sim.apply(calc_upi, axis=1)
+        sim["risk_level"] = sim["UPI"].apply(classify_risk)
+
+        sim_high = int((sim["risk_level"] == "High Risk").sum())
+        sim_avg_upi = float(sim["UPI"].mean())
+
+        st.markdown("### Results – Before vs After")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("High-risk patients (baseline)", base_high)
+        c2.metric(
+            "High-risk patients (simulation)",
+            sim_high,
+            f"{sim_high - base_high:+d}",
+        )
+        c3.metric(
+            "Average UPI (baseline → simulation)",
+            f"{base_avg_upi:.1f}",
+            f"{sim_avg_upi - base_avg_upi:+.1f}",
+        )
+
+        st.markdown("### Risk distribution – baseline vs simulation")
+
+        def risk_counts(df, label):
+            ct = df["risk_level"].value_counts().reindex(
+                ["High Risk", "Medium Risk", "Low Risk"], fill_value=0
+            )
+            out = ct.reset_index()
+            out.columns = ["risk_level", "count"]
+            out["scenario"] = label
+            return out
+
+        base_counts = risk_counts(base, "Baseline")
+        sim_counts = risk_counts(sim, "Simulation")
+        compare_df = pd.concat([base_counts, sim_counts], ignore_index=True)
+
+        fig_risk = px.bar(
+            compare_df,
+            x="risk_level",
+            y="count",
+            color="scenario",
+            barmode="group",
+            title="Risk distribution before vs after improvement",
+            labels={"risk_level": "Risk level", "count": "Patients"},
+        )
+        st.plotly_chart(fig_risk, use_container_width=True)
+
+        st.markdown("### Top patients with largest UPI improvement")
+
+        merged = base[["patient_id", "UPI"]].merge(
+            sim[["patient_id", "UPI"]],
+            on="patient_id",
+            suffixes=("_base", "_sim"),
+        )
+        merged["delta_upi"] = merged["UPI_sim"] - merged["UPI_base"]
+        improved = merged.sort_values("delta_upi").head(10)
+
+        st.dataframe(improved, use_container_width=True)
 
 # =====================================================================
 # FOOTER SIGNATURE
