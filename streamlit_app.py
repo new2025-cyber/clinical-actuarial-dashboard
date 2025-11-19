@@ -74,7 +74,7 @@ required_base = [
     "claims_amount",
     "provider_name",
     "drg_group",
-    "period",  # يمكن أن تكون شهر/ربع سنة/سنة
+    "period",  # شهر/ربع/سنة
 ]
 
 missing_base = [c for c in required_base if c not in data.columns]
@@ -82,7 +82,7 @@ if missing_base:
     st.error(f"Missing required columns: {missing_base}")
     st.stop()
 
-# expected_cost يمكن أن يكون باسمين مختلفين
+# expected_cost يمكن أن يكون بأحد اسمين
 if "expected_cost" in data.columns:
     expected_col = "expected_cost"
 elif "drg_expected_cost" in data.columns:
@@ -167,7 +167,6 @@ def compute_cars(df: pd.DataFrame) -> pd.DataFrame:
         dv_norm = 100.0 * (dv - dv.min()) / (dv.max() - dv.min() + 1e-9)
         out["CARS"] = 0.5 * crs + 0.3 * pcs + 0.2 * dv_norm
     else:
-        # fallback
         out["CARS"] = crs
 
     return out
@@ -509,15 +508,15 @@ with tab3:
     st.markdown("### B) Patient Risk Timeline (multi-metric)")
 
     if len(pt) >= 2:
-        # نحدد المقاييس التي نرغب في متابعتها عبر الزمن
+        # المقاييس التي نتابعها عبر الزمن
         timeline_metrics = ["UPI", "BAS", "CRS", "CARS", "PCS", "PPS", "FEI"]
-
         timeline_df = pt[["period"] + timeline_metrics].copy()
 
-        # تحويل إلى شكل long لعرضها في خط متعدد (line with color=Metric)
         tidy = timeline_df.melt(
-            id_vars="period", value_vars=timeline_metrics,
-            var_name="Metric", value_name="Value"
+            id_vars="period",
+            value_vars=timeline_metrics,
+            var_name="Metric",
+            value_name="Value",
         )
 
         fig_timeline = px.line(
@@ -697,5 +696,108 @@ with tab_val:
 
     df_sc = data.copy()
     df_sc["claims_amount"] = pd.to_numeric(df_sc["claims_amount"], errors="coerce")
-    df_sc = df_sc.dropna(subset["UPI", "claims_amount"])
-    # NOTE: fix subset syntax
+    df_sc = df_sc.dropna(subset=["UPI", "claims_amount"])
+
+    if len(df_sc) > 0:
+        fig_sc = px.scatter(
+            df_sc,
+            x="UPI",
+            y="claims_amount",
+            color="provider_name",
+            trendline="ols",  # requires statsmodels
+            title="UPI vs claims amount (with OLS trendline)",
+            labels={"UPI": "UPI", "claims_amount": "Claims amount"},
+        )
+        st.plotly_chart(fig_sc, use_container_width=True)
+
+        corr_upi_claims = df_sc["UPI"].corr(df_sc["claims_amount"])
+        st.caption(f"Correlation(UPI, claims) = {corr_upi_claims:.3f}")
+    else:
+        st.info("Not enough valid data to plot UPI vs claims.")
+
+    st.markdown("---")
+
+    # 3) Provider avg UPI vs avg DRG variance
+    st.markdown("### 3) Provider avg UPI vs avg DRG variance")
+
+    prov_val = (
+        data.groupby("provider_name")
+        .agg(
+            avg_upi=("UPI", "mean"),
+            avg_drg_var=("drg_variance", "mean"),
+            n=("patient_id", "count"),
+        )
+        .reset_index()
+    )
+
+    if len(prov_val) > 0:
+        fig_pv = px.scatter(
+            prov_val,
+            x="avg_upi",
+            y="avg_drg_var",
+            size="n",
+            hover_name="provider_name",
+            title="Provider avg UPI vs avg DRG variance",
+            labels={
+                "avg_upi": "Avg UPI",
+                "avg_drg_var": "Avg DRG variance (%)",
+                "n": "Patients",
+            },
+        )
+        st.plotly_chart(fig_pv, use_container_width=True)
+    else:
+        st.info("No provider-level aggregates available.")
+
+    st.markdown("---")
+
+    # 4) DRG variance distribution
+    st.markdown("### 4) DRG variance distribution")
+    dv = pd.to_numeric(data["drg_variance"], errors="coerce").dropna()
+    if len(dv) > 0:
+        fig_hist = px.histogram(
+            dv,
+            nbins=40,
+            title="DRG variance (%) distribution",
+            labels={"value": "DRG variance (%)", "count": "Count"},
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+    else:
+        st.info("No DRG variance data to display.")
+
+# ---------------------------------------------------------------------
+# LOGS
+# ---------------------------------------------------------------------
+with tab_logs:
+    st.subheader("Model Governance / Logs")
+
+    st.markdown("### Run history (from logs/upi_runs_log.csv)")
+
+    if os.path.isfile(LOG_FILE):
+        log_df = pd.read_csv(LOG_FILE)
+        log_df = log_df.sort_values("timestamp", ascending=False)
+        st.dataframe(log_df, use_container_width=True)
+
+        if len(log_df) >= 2:
+            trend_log = log_df.copy()
+            fig_log_trend = px.line(
+                trend_log,
+                x="timestamp",
+                y="avg_upi",
+                markers=True,
+                title="Logged runs – Average UPI over time",
+                labels={"timestamp": "Timestamp", "avg_upi": "Avg UPI"},
+            )
+            st.plotly_chart(fig_log_trend, use_container_width=True)
+    else:
+        st.info("No log file found yet. Use 'Log this run' in Level 1 to create it.")
+
+# =====================================================================
+# FOOTER SIGNATURE
+# =====================================================================
+st.markdown("---")
+st.markdown(
+    "<p style='text-align:center; color:#1f77b4; font-size:16px;'>Developed by "
+    "<b>Mudather</b></p>",
+    unsafe_allow_html=True,
+)
+st.caption("Model " + MODEL_VERSION + " • " + pd.Timestamp.today().strftime("%Y-%m-%d"))
